@@ -1,0 +1,45 @@
+from Bio import Entrez
+from ete3 import NCBITaxa
+
+def get_taxonomic_tree(taxonomic_group, email):
+    Entrez.email = email
+    ncbi = NCBITaxa()
+    # Search for the taxonomic group to get the NCBI Taxonomy ID
+    search_handle = Entrez.esearch(db="taxonomy", term=taxonomic_group, retmode="xml")
+    search_results = Entrez.read(search_handle)
+    search_handle.close()
+    tax_id = search_results['IdList'][0]
+    # Get the taxonomic tree
+    lineage = ncbi.get_lineage(tax_id)
+    names = ncbi.get_taxid_translator(lineage)
+    # Generate a tree view as a string
+    tree_str = ""
+    for depth, taxid in enumerate(lineage):
+        tree_str += " " * depth + f"- {names[taxid]} ('{taxid}')\n"
+    print(tree_str)
+    return tree_str
+
+def get_protein_sequences(protein_family, taxonomic_group, email):
+    Entrez.email = email
+    query = f"{protein_family}[Protein Name] AND {taxonomic_group}[Organism]"
+    search_handle = Entrez.esearch(db="protein", term=query, retmax=10, retmode="xml")
+    search_results = Entrez.read(search_handle)
+    search_handle.close()
+    protein_ids = search_results['IdList']
+    fetch_handle = Entrez.efetch(db="protein", id=",".join(protein_ids), rettype="fasta", retmode="text")
+    protein_sequences = fetch_handle.read()
+    fetch_handle.close()
+    return protein_sequences
+
+# User inputs
+email_input = input("Please enter your email: ")
+protein_family_input = input("Enter the protein family: ")
+taxonomic_group_input = input("Enter the taxonomic group: ")
+
+# Retrieve and print the taxonomic tree view
+get_taxonomic_tree(taxonomic_group_input, email_input)
+
+# Retrieve and print the protein sequences
+sequences = get_protein_sequences(protein_family_input, taxonomic_group_input, email_input)
+print(sequences)
+
