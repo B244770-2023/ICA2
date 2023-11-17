@@ -46,18 +46,21 @@ def fetch_sequences(taxonomy, protein_family):
     fetch_handle.close()
     
 #    return protein_sequences
-    with open('sequences.fasta', 'w') as file:
+    folder_path = f'{taxonomy}/{protein_family}'
+    if not os.path.exists(folder_path):
+        os.makedirs(folder_path)
+    with open(f'{folder_path}/sequences.fasta', 'w') as file:
          file.write(str(protein_sequences))
 
-def run_emboss_conservation(sequences):
+def run_emboss_conservation(taxonomy, protein_family, sequences):
     # to analyze sequence conservation.
     # 1st to run clustal omega sequence alignment
-    subprocess.run(["clustalo", "-i", 'sequences.fasta', "-o", 
-		    "aligned_sequences.fasta", "--force", "--outfmt=fasta"])
+    subprocess.run(["clustalo", "-i", f'{taxonomy}/{protein_family}/sequences.fasta', "-o", 
+		    f"{taxonomy}/{protein_family}/aligned_sequences.fasta", "--force", "--outfmt=fasta"])
 
     # 2nd using plotcon for conservation analysis and generate png plot
-    subprocess.run(["plotcon", "-sequence", "aligned_sequences.fasta", 
-                "-winsize", "4", "-graph", "png", "-goutfile", "conservation_plot"])
+    subprocess.run(["plotcon", "-sequence", f"{taxonomy}/{protein_family}/aligned_sequences.fasta", 
+                "-winsize", "4", "-graph", "png", "-goutfile", f"{taxonomy}/{protein_family}/conservation_plot"])
 
 def plot_conservation(conservation_data):
     # from the conservation analysis data.
@@ -85,7 +88,7 @@ def main():
     protein_family = input("Enter the protein family: ")
     #fetch the sequence
     sequences = fetch_sequences(taxonomy, protein_family)
-    conservation_data = run_emboss_conservation(sequences)
+    conservation_data = run_emboss_conservation(taxonomy, protein_family, sequences)
     plot_conservation(conservation_data)
     prosite_results = scan_prosite(sequences)
     
@@ -99,4 +102,8 @@ def main():
     print(additional_results)
 
 if __name__ == '__main__':
+    #set working dir as cwd or a configured one
+    working_directory = os.getcwd() if len(sys.argv) == 1 else sys.argv[1]
+    input_folder = os.path.join(working_directory, "input_files")
+    output_folder = os.path.join(working_directory, "output_files")
     main()
