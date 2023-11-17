@@ -1,0 +1,102 @@
+#!/usr/bin/python3
+
+import os
+import sys
+import subprocess
+from Bio import Entrez
+
+def set_working_directory():
+    script_path = os.path.abspath(__file__)
+    
+    #getting current directory of the script
+    script_dir = os.path.dirname(script_path)
+
+    #change working dir
+    os.chdir(script_dir)
+    print(f"working directory changed to: {script_dir}")
+
+Entrez.email = 'srtse52@outlook.com'
+
+def get_taxonomic_tree(taxonomic_group, email):
+    ncbi = NCBITaxa()
+    # Search for the taxonomic group to get the NCBI Taxonomy ID
+    search_handle = Entrez.esearch(db="taxonomy", term=taxonomic_group, retmode="xml")
+    search_results = Entrez.read(search_handle)
+    search_handle.close()
+    tax_id = search_results['IdList'][0]
+    # Get the taxonomic tree
+    lineage = ncbi.get_lineage(tax_id)
+    names = ncbi.get_taxid_translator(lineage)
+    # Generate a tree view as a string
+    tree_str = ""
+    for depth, taxid in enumerate(lineage):
+        tree_str += " " * depth + f"- {names[taxid]} ('{taxid}')\n"
+    print(tree_str)
+    return tree_str
+
+def fetch_sequences(taxonomy, protein_family):
+    # to fetch sequences based on taxonomy and protein family.
+    query = f"{protein_family}[Protein Name] AND {taxonomy}[Organism]"
+    search_handle = Entrez.esearch(db="protein", term=query, retmax=10, retmode="xml")
+    search_results = Entrez.read(search_handle)
+    search_handle.close()
+    protein_ids = search_results['IdList']
+    fetch_handle = Entrez.efetch(db="protein", id=",".join(protein_ids), rettype="fasta", retmode="text")
+    protein_sequences = fetch_handle.read()
+    fetch_handle.close()
+    
+#    return protein_sequences
+    with open('sequences.fasta', 'w') as file:
+         file.write(str(protein_sequences))
+
+def run_emboss_conservation(sequences):
+    # to analyze sequence conservation.
+    # 1st to run clustal omega sequence alignment
+    subprocess.run(["clustalo", "-i", 'sequences.fasta', "-o", 
+		    "aligned_sequences.fasta", "--force", "--outfmt=fasta"])
+
+    # 2nd using plotcon for conservation analysis and generate png plot
+    subprocess.run(["plotcon", "-sequence", "aligned_sequences.fasta", 
+                "-winsize", "4", "-graph", "png", "-goutfile", "conservation_plot"])
+
+def plot_conservation(conservation_data):
+    # from the conservation analysis data.
+    return 0
+
+def scan_prosite(sequences):
+    # Placeholder for the function that would scan sequences
+    # against the PROSITE database to identify known motifs.
+    return 0
+    
+def perform_additional_emboss_analysis(sequences):
+    # Placeholder for additional EMBOSS analysis functions.
+    return 0
+
+def main():
+    #setting the working directory and exception check
+    try:
+        set_working_directory()
+    except Exception as e:
+        print(f"ERROR:can't set working director: {e}")
+        sys.exit(1)
+
+    #input the main info of the protein
+    taxonomy = input("Enter the taxonomic group: ")
+    protein_family = input("Enter the protein family: ")
+    #fetch the sequence
+    sequences = fetch_sequences(taxonomy, protein_family)
+    conservation_data = run_emboss_conservation(sequences)
+    plot_conservation(conservation_data)
+    prosite_results = scan_prosite(sequences)
+    
+    # You might want to print or process the results further.
+    print(prosite_results)
+    
+    # Additional analysis could be done here.
+    additional_results = perform_additional_emboss_analysis(sequences)
+    
+    # Process and present additional results.
+    print(additional_results)
+
+if __name__ == '__main__':
+    main()
