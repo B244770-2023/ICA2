@@ -3,7 +3,8 @@
 import os
 import sys
 import subprocess
-from Bio import Entrez
+from Bio import Entrez,SeqIO
+from Bio.ExPASy import ScanProsite
 
 def set_working_directory():
     script_path = os.path.abspath(__file__)
@@ -78,11 +79,12 @@ def get_species_protein_ids(taxonomy, protein_family):
 # download sequences based on chosen species
 def fetch_sequences(species_protein_map, taxonomy):
 
-    # Create directory for the species
-    folder_path = f'{taxonomy}'
+    # Create directory for the inerested proteins
+    folder_path = f'interested/{taxonomy}'
     if not os.path.exists(folder_path):
         os.makedirs(folder_path)
 
+    sequences = {}
     # fetch handle
     for species, protein_id in species_protein_map.items():
         fetch_handle = Entrez.efetch(db="protein", id=protein_id, rettype="fasta", retmode="text")
@@ -94,72 +96,10 @@ def fetch_sequences(species_protein_map, taxonomy):
         with open(file_path, 'w') as file:
             file.write(str(protein_sequence))
 
-# #fetch all sequences and write in separate files based on user's choice
-# def fetch_sequences(taxonomy, protein_family):
-#     # Fetch sequences based on given taxonomy and protein family
-#     query = f"{protein_family}[Protein Name] AND {taxonomy}[Organism]"
-#     # change parameters here
-#     search_handle = Entrez.esearch(db="protein", term=query, retmax=10, retmode="xml")
-#     search_results = Entrez.read(search_handle)
-#     search_handle.close()
-#     # fetch protein ids for option
-#     all_protein_ids = search_results['IdList']
-    
-#     # fetch names of each protein's species
-#     species_names = []
-#     for protein_id in all_protein_ids:
-#         fetch_handle = Entrez.efetch(db="protein", id=protein_id, rettype="gb", retmode="xml")
-#         protein_record = Entrez.read(fetch_handle)
-#         fetch_handle.close()
-#         species_name = protein_record[0]['GBSeq_organism']
-#         species_names.append(species_name)
+        # save sequences for scanning
+        sequences[species] = str(SeqIO.read(file_path, "fasta").seq)
 
-#     # give a list of species options with index
-#     print("\nAvailable species:")
-#     for idx, name in enumerate(species_names, start=1):
-#         print(f"{idx}. {name}")
-
-#     # ask if user want to download all sequences or part of them
-#     download_choice = input("\nEnter the number for the species you want to download, or type 'all' to download all: ")
-
-#     # Create directory for the species
-#     folder_path = f'{taxonomy}'
-#     if not os.path.exists(folder_path):
-#         os.makedirs(folder_path)
-
-#     # download all sequences
-#     if download_choice.lower() == 'all':
-#         for idx, protein_id in enumerate(protein_ids):
-#             fetch_handle = Entrez.efetch(db="protein", id=protein_id, rettype="fasta", retmode="text")
-#             protein_sequence = fetch_handle.read()
-#             fetch_handle.close()
-            
-#             # writing to files
-#             file_path = os.path.join(folder_path, f"{species_names[idx]}.fasta")
-#             with open(file_path, 'w') as file:
-#                 file.write(str(protein_sequence))
-
-#     # download selected
-#     else:
-#         selected_index = int(download_choice) - 1
-#         fetch_handle = Entrez.efetch(db="protein", id=protein_ids[selected_index], rettype="fasta", retmode="text")
-#         protein_sequence = fetch_handle.read()
-#         fetch_handle.close()
-#         # writing to files
-#         file_path = os.path.join(folder_path, f"{species_names[selected_index]}.fasta")
-#         with open(file_path, 'w') as file:
-#             file.write(str(protein_sequence))
-
-    # # Fetch and save each sequence in a separate file named after the species
-    # for protein_id in protein_ids:
-    #     fetch_handle = Entrez.efetch(db="protein", id=protein_id, rettype="fasta", retmode="text")
-    #     protein_sequence = fetch_handle.read()
-    #     fetch_handle.close()
-
-    #     file_path = os.path.join(folder_path, f"{protein_id}.fasta")
-    #     with open(file_path, 'w') as file:
-    #         file.write(str(protein_sequence))
-
+    return sequences
 
 def run_emboss_conservation(taxonomy, protein_family, sequences):
     # to analyze sequence conservation.
@@ -174,38 +114,11 @@ def run_emboss_conservation(taxonomy, protein_family, sequences):
         print(f"Error Msg: {e}")
 
 def scan_prosite(sequences):
-    # Fetch sequences based on given taxonomy and protein family
-    query = f"{protein_family}[Protein Name] AND {taxonomy}[Organism]"
-    # change parameters here
-    search_handle = Entrez.esearch(db="protein", term=query, retmax=10, retmode="xml")
-    search_results = Entrez.read(search_handle)
-    search_handle.close()
-    # fetch protein ids for option
-    all_protein_ids = search_results['IdList']
-    
-    # fetch names of each protein's species
-    species_names = []
-    for protein_id in all_protein_ids:
-        fetch_handle = Entrez.efetch(db="protein", id=protein_id, rettype="gb", retmode="xml")
-        protein_record = Entrez.read(fetch_handle)
-        fetch_handle.close()
-        species_name = protein_record[0]['GBSeq_organism']
-        species_names.append(species_name)
-
-    # give a list of species options with index
-    print("\nAvailable species:")
-    for idx, name in enumerate(species_names, start=1):
-        print(f"{idx}. {name}")
-   
-
-def scan_protein_sequence(sequence):
-    # Scan the protein sequence for PROSITE motifs
-    scan_results = ScanProsite.scan(sequence)
-
-    # Parse and return the results
-    matched_motifs = []
-    for result in scan_results:
-        matched_motifs.append(result['signature_ac'])
+    #scan sequences with motifs from prosite db
+    motifs_results = {}
+    for species, sequence in sequences.items():
+        scan_results = ScanProsite.scan(seq=sequence)
+        matched_motifs[species] = [result['signature_ac'] for result in scan_results]
 
     return matched_motifs
 
@@ -213,33 +126,79 @@ def perform_additional_emboss_analysis(sequences):
     # Placeholder for additional EMBOSS analysis functions.
     return 0
 
+def main_menu():
+    print("1. Conservation Analysis")
+    print("2. Scan for PROSITE Motifs")
+    print("3. EMBOSS 1")
+    print("4. EMBOSS 2")
+    print("5. Exit")
+    choice = input("Enter your choice: ")
+    return choice
+
 def main():
-    #setting the working directory and exception check
+    '''SETTING THE WORKING DIRECTORY AND EXCEPTION CHECK'''
     try:
         set_working_directory()
     except Exception as e:
         print(f"ERROR:can't set working director: {e}")
         sys.exit(1)
 
-    # input the main info of the protein
-    taxonomy = input("Enter the taxonomic group: ")
-    protein_family = input("Enter the protein family: ")
+    '''CHOOSE FUNCTIONALITY'''
+    while True:
+        choice = main_menu()
 
-    # fetch the sequence
-    sequences = fetch_sequences(taxonomy, protein_family)
+    '''CONSERVATION ANALYSIS'''
+    if choice == '1'
+        # input the main info of the protein
+        taxonomy = input("Enter the taxonomic group: ")
+        protein_family = input("Enter the protein family: ")
 
-    # run emboss conservation analysis
-    conservation_data = run_emboss_conservation(taxonomy, protein_family, sequences)
+        # fetch all the sequence
+        all_sequences = fetch_sequences_all(taxonomy, protein_family)
 
-    # scan protein sequence with interest
-    interested_protein_id = input("Enter protein id of your choice: ")
-    interested_protein_sequence = 
-    prosite_results = scan_prosite(sequences)
+        # run emboss conservation analysis
+        conservation_data = run_emboss_conservation(taxonomy, protein_family, all_sequences)
+
+    '''SCAN PROTEIN SEQUENCE WITH INTEREST'''
+    if choice == '2'
+        # input the main info of the protein
+        taxonomy = input("Enter the taxonomic group: ")
+        protein_family = input("Enter the protein family: ")
+
+        #species mapping
+        species_protein_map = get_species_protein_ids(taxonomy, protein_family)
+        # giving a list of species and corresponding protein ids
+        print("\nAvailable species and corresponding protein IDs:")
+        for idx, (species, protein_id) in enumerate(species_protein_map.items(), start=1):
+            print(f"{idx}. {species} - {protein_id}")
+
+        # giving options for user
+        download_choice = input("\nEnter protein id of your choice. Type 'all' for all sequences, or 'select' to choose specific ones: ")
+        # download all sequence
+        if download_choice.lower() == 'all':
+            fetch_sequences(species_protein_map, taxonomy)
+        # download selected ones
+        elif download_choice.lower() == 'select':
+            selected_indexes = input("Enter the numbers of species you are interested in (separated by commas): ")
+            selected_species = {species: species_protein_map[species] 
+                                for idx, species in enumerate(species_protein_map, start=1)
+                                if str(idx) in selected_indexes.split(',')}
+            # fetch the sequence
+            fetch_sequences(selected_species, taxonomy)
+
+        # matched ones
+        matched_motifs = scan_prosite(sequences)
+        # display
+        for species, motifs in matched_motifs.items():
+            print(f"\n{species} has the following motifs:")
+            for motif in motifs:
+                print(motif)
+        interested_protein_id = input("Enter protein id of your choice: ")
+        interested_protein_sequence = 
+        prosite_results = scan_prosite(sequences)
     
-    # You might want to print or process the results further.
-    print(prosite_results)
-    
-    # Additional analysis could be done here.
+    '''addtional'''
+    if choice =='3'
     additional_results = perform_additional_emboss_analysis(sequences)
     
     # Process and present additional results.
