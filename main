@@ -1,11 +1,17 @@
 #!/usr/bin/python3
 
 import os
+import io
 import sys
+import requests
 import subprocess
 from Bio import Entrez,SeqIO
+from Bio.SeqRecord import SeqRecord
 from Bio.ExPASy import ScanProsite
+from Bio.Blast import NCBIWWW
+from bs4 import BeautifulSoup
 
+'''SET WORKING DIRECTORY'''
 def set_working_directory():
     script_path = os.path.abspath(__file__)
     
@@ -16,8 +22,7 @@ def set_working_directory():
     os.chdir(script_dir)
     print(f"working directory changed to: {script_dir}")
 
-Entrez.email = 'srtse52@outlook.com'
-
+'''DRAW A TAXONOMIC TREE'''
 def get_taxonomic_tree(taxonomic_group, email):
     ncbi = NCBITaxa()
     # Search for the taxonomic group to get the NCBI Taxonomy ID
@@ -35,11 +40,11 @@ def get_taxonomic_tree(taxonomic_group, email):
     print(tree_str)
     return tree_str
 
-#fetch all sequences and write in on file
-def fetch_sequences_all(taxonomy, protein_family):
+'''FETCH ALL SEQUENCES AND WRITE IN ON FILE, WITH A LIMIT'''
+def fetch_sequences_all(taxonomy, protein_family, limit):
     # to fetch sequences based on taxonomy and protein family.
     query = f"{protein_family}[Protein Name] AND {taxonomy}[Organism]"
-    search_handle = Entrez.esearch(db="protein", term=query, retmax=10, retmode="xml")
+    search_handle = Entrez.esearch(db="protein", term=query, retmax=limit, retmode="xml")
     search_results = Entrez.read(search_handle)
     search_handle.close()
     protein_ids = search_results['IdList']
@@ -54,11 +59,11 @@ def fetch_sequences_all(taxonomy, protein_family):
     with open(f'{folder_path}/sequences.fasta', 'w') as file:
          file.write(str(protein_sequences))
 
-# get species~protein_ids list
-def get_species_protein_ids(taxonomy, protein_family):
+'''GET SPECIES~PROTEIN_IDS LIST'''
+def get_species_protein_ids(taxonomy, protein_family, limit):
     # fetch all sequences
     query = f"{protein_family}[Protein Name] AND {taxonomy}[Organism]"
-    search_handle = Entrez.esearch(db="protein", term=query, retmax=10, retmode="xml")
+    search_handle = Entrez.esearch(db="protein", term=query, retmax=limit, retmode="xml")
     search_results = Entrez.read(search_handle)
     search_handle.close()
 
@@ -75,8 +80,17 @@ def get_species_protein_ids(taxonomy, protein_family):
 
     return species_protein_map
 
+'''PARSE DICTIONARY OBJ TO FASTA FORMAT'''
+def to_fasta_format(seq_dict):
+    fasta_format_str = ""
+    for species, seq in seq_dict.items():
+        seq_record = SeqRecord(seq, id=species, description="")
+        output = io.StringIO()
+        SeqIO.write(seq_record, output, "fasta")
+        fasta_format_str += output.getvalue()
+    return fasta_format_str
 
-# download sequences based on chosen species
+'''DOWNLOAD SEQUENCES BASED ON CHOSEN SPECIES'''
 def fetch_sequences(species_protein_map, taxonomy):
 
     # Create directory for the inerested proteins
@@ -96,11 +110,13 @@ def fetch_sequences(species_protein_map, taxonomy):
         with open(file_path, 'w') as file:
             file.write(str(protein_sequence))
 
-        # save sequences for scanning
-        sequences[species] = str(SeqIO.read(file_path, "fasta").seq)
+        # save sequences to dic for scanning
 
+        seq_record = SeqIO.read(file_path, "fasta")
+        sequences[species] = seq_record.seq
     return sequences
 
+'''EMOBOSS CONSERVATION ANALYSIS'''
 def run_emboss_conservation(taxonomy, protein_family, sequences):
     # to analyze sequence conservation.
     try:
@@ -108,33 +124,96 @@ def run_emboss_conservation(taxonomy, protein_family, sequences):
         subprocess.run(["clustalo", "-i", f'{taxonomy}/{protein_family}/sequences.fasta', "-o", f"{taxonomy}/{protein_family}/aligned_sequences.fasta", "--force", "--outfmt=fasta"])
 
     # 2nd using plotcon for conservation analysis and generate png plot
-    subprocess.run(["plotcon", "-sequence", f"{taxonomy}/{protein_family}/aligned_sequences.fasta", 
+        subprocess.run(["plotcon", "-sequence", f"{taxonomy}/{protein_family}/aligned_sequences.fasta", 
                 "-winsize", "4", "-graph", "png", "-goutfile", f"{taxonomy}/{protein_family}/conservation_plot"])
     except Exception as e:
         print(f"Error Msg: {e}")
 
+'''FUNCTION FOR PROSITE SCANNING'''
 def scan_prosite(sequences):
     #scan sequences with motifs from prosite db
-    motifs_results = {}
-    for species, sequence in sequences.items():
-        scan_results = ScanProsite.scan(seq=sequence)
-        matched_motifs[species] = [result['signature_ac'] for result in scan_results]
-
+    matched_motifs = {}
+    for sequence in sequences:
+        if sequence: # empty check
+            search_handle = ScanProsite.scan(seq=sequence, output='html')
+            scan_results = ScanProsite.read(search_handle)
+            motifs_results[species] = [result['signature_ac'] for result in scan_results]
     return matched_motifs
 
-def perform_additional_emboss_analysis(sequences):
-    # Placeholder for additional EMBOSS analysis functions.
-    return 0
+'''BLAST'''
+def do_blast(sequences):
+    for sequence in sequences:
+        result_handle = NCBIWWW.qblast("blastp", "nr", sequence.seq)
+    return result_handle.read()
 
+'''SWISS-MODEL'''
+def predict_structure(protein_sequence):
+    # query url
+    swiss_model_url = "https://swissmodel.expasy.org/interactive"
+
+    # create a post
+    response = requests.post(swiss_model_url, data={"seq": protein_sequence})
+
+    # check response
+    if response.status_code == 200:
+        # get response url using soup
+        soup = BeautifulSoup(response.text, "html.parser")
+        result_link = soup.find("a", class_="models-result-link")
+        if result_link:
+            result_url = result_link.get("href")
+            return result_url
+    else:
+        return "Failed to request SWISS-MODEL API"
+
+'''FETCH CODE WRAP'''
+'''codes for fetch prefered protein sequences and return in dictionary'''
+def fetch_wrap():
+    # input the main info of the protein
+    Entrez.email = 'srtse52@outlook.com'
+    # Entrez.email = input("Enter your Email: ")
+    taxonomy = 'aves'
+    # taxonomy = input("Enter the taxonomic group: ")
+    protein_family = 'glucose-6-phosphatase'
+    # protein_family = input("Enter the protein family: ")
+    limit = 5
+    # limit = input("Enter the max number of fetched results: ")
+    # Initialize sequences as an empty dictionary
+    sequences = {}
+    #species mapping
+    species_protein_map = get_species_protein_ids(taxonomy, protein_family, limit)
+    # giving a list of species and corresponding protein ids
+    print("\nAvailable species and corresponding protein IDs:")
+    for idx, (species, protein_id) in enumerate(species_protein_map.items(), start=1):
+        print(f"{idx}. {species} - {protein_id}")
+
+    # giving options for user
+    download_choice = input("\nEnter protein id of your choice. Type 'all' for all sequences, or 'select' to choose specific ones: ")
+    # download all sequence
+    if download_choice.lower() == 'all':
+        sequences = fetch_sequences(species_protein_map, taxonomy)
+    # download selected ones
+    elif download_choice.lower() == 'select':
+        selected_indexes = input("Enter the numbers of species you are interested in (separated by commas): ")
+        selected_species = {species: species_protein_map[species] 
+                            for idx, species in enumerate(species_protein_map, start=1)
+                            if str(idx) in selected_indexes.split(',')}
+        # fetch the sequence
+        sequences = fetch_sequences(selected_species, taxonomy)
+    return sequences
+
+'''MAIN MENU'''
 def main_menu():
     print("1. Conservation Analysis")
     print("2. Scan for PROSITE Motifs")
-    print("3. EMBOSS 1")
-    print("4. EMBOSS 2")
+    print("3. Perform Blast Analysis")
+    print("4. Structure Prediction with SWISS-MODEL")
     print("5. Exit")
-    choice = input("Enter your choice: ")
+    print("6. Exit")
+    choice = input("Choose a module by typing a number: ")
     return choice
 
+
+'''ALL WORKS START HERE'''
 def main():
     '''SETTING THE WORKING DIRECTORY AND EXCEPTION CHECK'''
     try:
@@ -147,62 +226,46 @@ def main():
     while True:
         choice = main_menu()
 
-    '''CONSERVATION ANALYSIS'''
-    if choice == '1'
-        # input the main info of the protein
-        taxonomy = input("Enter the taxonomic group: ")
-        protein_family = input("Enter the protein family: ")
+        '''CONSERVATION ANALYSIS'''
+        if choice == '1':
+            # input the main info of the protein
+            Entrez.email = input("Enter your Email: ")
+            taxonomy = input("Enter the taxonomic group: ")
+            protein_family = input("Enter the protein family: ")
+            limit = input("Enter the max number of fetched results: ")
 
-        # fetch all the sequence
-        all_sequences = fetch_sequences_all(taxonomy, protein_family)
+            # fetch all the sequence within a limited number
+            all_sequences = fetch_sequences_all(taxonomy, protein_family, limit)
 
-        # run emboss conservation analysis
-        conservation_data = run_emboss_conservation(taxonomy, protein_family, all_sequences)
+            # run emboss conservation analysis
+            conservation_data = run_emboss_conservation(taxonomy, protein_family, all_sequences)
 
-    '''SCAN PROTEIN SEQUENCE WITH INTEREST'''
-    if choice == '2'
-        # input the main info of the protein
-        taxonomy = input("Enter the taxonomic group: ")
-        protein_family = input("Enter the protein family: ")
+        '''SCAN PROTEIN SEQUENCE WITH INTEREST'''
+        if choice == '2':
+            sequences = fetch_wrap()
+            # scan motifs
+            matched_motifs = scan_prosite(to_fasta_format(sequences))
+            # display
+            for species, motifs in matched_motifs.items():
+                print(f"\n{species} has the following motifs:")
+                for motif in motifs:
+                    print(motif)
+        
+        '''BLAST'''
+        if choice =='3':
+            do_blast(fetch_wrap())
+        
+        '''Predict Structure'''
+        if choice =='4':
+            print(predict_structure(fetch_wrap()))
 
-        #species mapping
-        species_protein_map = get_species_protein_ids(taxonomy, protein_family)
-        # giving a list of species and corresponding protein ids
-        print("\nAvailable species and corresponding protein IDs:")
-        for idx, (species, protein_id) in enumerate(species_protein_map.items(), start=1):
-            print(f"{idx}. {species} - {protein_id}")
+        '''BLAST'''
+        if choice =='5':
+            do_blast(fetch_wrap)
 
-        # giving options for user
-        download_choice = input("\nEnter protein id of your choice. Type 'all' for all sequences, or 'select' to choose specific ones: ")
-        # download all sequence
-        if download_choice.lower() == 'all':
-            fetch_sequences(species_protein_map, taxonomy)
-        # download selected ones
-        elif download_choice.lower() == 'select':
-            selected_indexes = input("Enter the numbers of species you are interested in (separated by commas): ")
-            selected_species = {species: species_protein_map[species] 
-                                for idx, species in enumerate(species_protein_map, start=1)
-                                if str(idx) in selected_indexes.split(',')}
-            # fetch the sequence
-            fetch_sequences(selected_species, taxonomy)
-
-        # matched ones
-        matched_motifs = scan_prosite(sequences)
-        # display
-        for species, motifs in matched_motifs.items():
-            print(f"\n{species} has the following motifs:")
-            for motif in motifs:
-                print(motif)
-        interested_protein_id = input("Enter protein id of your choice: ")
-        interested_protein_sequence = 
-        prosite_results = scan_prosite(sequences)
-    
-    '''addtional'''
-    if choice =='3'
-    additional_results = perform_additional_emboss_analysis(sequences)
-    
-    # Process and present additional results.
-    print(additional_results)
+        '''BLAST'''
+        if choice =='6':
+            do_blast(fetch_wrap)
 
 if __name__ == '__main__':
     #set working dir as cwd or a configured one
