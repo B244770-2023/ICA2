@@ -5,8 +5,6 @@ import io
 import sys
 import requests
 import subprocess
-from Bio import Entrez,SeqIO
-from Bio.SeqRecord import SeqRecord
 from Bio.ExPASy import ScanProsite
 from Bio.Blast import NCBIWWW
 from bs4 import BeautifulSoup
@@ -22,77 +20,84 @@ def set_working_directory():
     os.chdir(script_dir)
     print(f"working directory changed to: {script_dir}")
 
+'''RUN COMMANDS FUNCTION'''
+def run_command(command):
+    try:
+        # if command is a list, convert it to a string
+        if isinstance(command, list):
+            command = ' '.join(command)
+        result = subprocess.run(command, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+        return result.stdout
+    except subprocess.CalledProcessError as e:
+        print(f"Error running command: {e.stderr}")
+        sys.exit(1)
+        
 '''DRAW A TAXONOMIC TREE'''
-def get_taxonomic_tree(taxonomic_group, email):
-    ncbi = NCBITaxa()
+def get_taxonomic_tree(taxonomic_group):
     # Search for the taxonomic group to get the NCBI Taxonomy ID
-    search_handle = Entrez.esearch(db="taxonomy", term=taxonomic_group, retmode="xml")
-    search_results = Entrez.read(search_handle)
-    search_handle.close()
-    tax_id = search_results['IdList'][0]
-    # Get the taxonomic tree
-    lineage = ncbi.get_lineage(tax_id)
-    names = ncbi.get_taxid_translator(lineage)
-    # Generate a tree view as a string
+    search_xml = run_command(f"esearch -db taxonomy -query '{taxonomic_group}' | efetch -format xml")
+    root = ET.fromstring(search_xml)
+    tax_id = root.find(".//Id").text
+
+    # get the lineage
+    lineage_xml = run_command(f"efetch -db taxonomy -id {tax_id} -format xml")
+    lineage_root = ET.fromstring(lineage_xml)
+
+    # extract lineage information
+    lineage_ids = [taxon.find('TaxId').text for taxon in lineage_root.findall(".//LineageEx/Taxon")]
+    lineage_names = [taxon.find('ScientificName').text for taxon in lineage_root.findall(".//LineageEx/Taxon")]
+
+    # generate a tree view as a string
     tree_str = ""
-    for depth, taxid in enumerate(lineage):
-        tree_str += " " * depth + f"- {names[taxid]} ('{taxid}')\n"
-    print(tree_str)
+    for depth, (taxid, name) in enumerate(zip(lineage_ids, lineage_names)):
+        tree_str += " " * depth + f"- {name} ('{taxid}')\n"
+    
     return tree_str
 
 '''FETCH ALL SEQUENCES AND WRITE IN ON FILE, WITH A LIMIT'''
 def fetch_sequences_all(taxonomy, protein_family, limit):
-    # to fetch sequences based on taxonomy and protein family.
     query = f"{protein_family}[Protein Name] AND {taxonomy}[Organism]"
-    search_handle = Entrez.esearch(db="protein", term=query, retmax=limit, retmode="xml")
-    search_results = Entrez.read(search_handle)
-    search_handle.close()
-    protein_ids = search_results['IdList']
-    fetch_handle = Entrez.efetch(db="protein", id=",".join(protein_ids), rettype="fasta", retmode="text")
-    protein_sequences = fetch_handle.read()
-    fetch_handle.close()
-    
-#    return protein_sequences
+    protein_sequences = run_command(["esearch", "-db", "protein", "-query", query, "|", "efetch", "-format", "fasta"])
+
+    # save sequences to a file
     folder_path = f'{taxonomy}/{protein_family}'
     if not os.path.exists(folder_path):
         os.makedirs(folder_path)
     with open(f'{folder_path}/sequences.fasta', 'w') as file:
-         file.write(str(protein_sequences))
+        file.write(protein_sequences)
 
 '''GET SPECIES~PROTEIN_IDS LIST'''
 def get_species_protein_ids(taxonomy, protein_family, limit):
-    # fetch all sequences
+    # fetch all sequence IDs
     query = f"{protein_family}[Protein Name] AND {taxonomy}[Organism]"
-    search_handle = Entrez.esearch(db="protein", term=query, retmax=limit, retmode="xml")
-    search_results = Entrez.read(search_handle)
-    search_handle.close()
+    ids = run_command(f"esearch -db protein -query '{query}' -retmax {limit} | efetch -format docsum")
 
-    protein_ids = search_results['IdList']
+    # parse XML to extract protein IDs
+    root = ET.fromstring(ids)
+    protein_ids = [docsum.find('Id').text for docsum in root.findall('DocumentSummary')]
+
     species_protein_map = {}
-
     # fetch names of each protein's species
     for protein_id in protein_ids:
-        fetch_handle = Entrez.efetch(db="protein", id=protein_id, rettype="gb", retmode="xml")
-        protein_record = Entrez.read(fetch_handle)
-        fetch_handle.close()
-        species_name = protein_record[0]['GBSeq_organism']
+        xml_data = run_command(f"efetch -db protein -id {protein_id} -format gb")
+        xml_root = ET.fromstring(xml_data)
+        species_name = xml_root.find(".//GBSeq_organism").text
         species_protein_map[species_name] = protein_id
-
     return species_protein_map
 
 '''PARSE DICTIONARY OBJ TO FASTA FORMAT'''
 def to_fasta_format(seq_dict):
     fasta_format_str = ""
     for species, seq in seq_dict.items():
-        seq_record = SeqRecord(seq, id=species, description="")
-        output = io.StringIO()
-        SeqIO.write(seq_record, output, "fasta")
-        fasta_format_str += output.getvalue()
+        # Add the identifier line
+        fasta_format_str += f">{species}\n"
+        # Add the sequence line
+        fasta_format_str += f"{seq}\n"
     return fasta_format_str
 
 '''DOWNLOAD SEQUENCES BASED ON CHOSEN SPECIES'''
 def fetch_sequences(species_protein_map, taxonomy):
-
+    
     # Create directory for the inerested proteins
     folder_path = f'interested/{taxonomy}'
     if not os.path.exists(folder_path):
@@ -101,19 +106,16 @@ def fetch_sequences(species_protein_map, taxonomy):
     sequences = {}
     # fetch handle
     for species, protein_id in species_protein_map.items():
-        fetch_handle = Entrez.efetch(db="protein", id=protein_id, rettype="fasta", retmode="text")
-        protein_sequence = fetch_handle.read()
-        fetch_handle.close()
+        # Fetch the protein sequence using efetch
+        protein_sequence = run_command(["efetch", "-db", "protein", "-id", protein_id, "-format", "fasta"])
 
-        # writing to file
+        # Write the sequence to a file
         file_path = os.path.join(folder_path, f"{species}.fasta")
         with open(file_path, 'w') as file:
-            file.write(str(protein_sequence))
+            file.write(protein_sequence)
 
-        # save sequences to dic for scanning
-
-        seq_record = SeqIO.read(file_path, "fasta")
-        sequences[species] = seq_record.seq
+        # Save the sequence to a dictionary
+        sequences[species] = protein_sequence
     return sequences
 
 '''EMOBOSS CONSERVATION ANALYSIS'''
@@ -168,9 +170,6 @@ def predict_structure(protein_sequence):
 '''FETCH CODE WRAP'''
 '''codes for fetch prefered protein sequences and return in dictionary'''
 def fetch_wrap():
-    # input the main info of the protein
-    Entrez.email = 'srtse52@outlook.com'
-    # Entrez.email = input("Enter your Email: ")
     taxonomy = 'aves'
     # taxonomy = input("Enter the taxonomic group: ")
     protein_family = 'glucose-6-phosphatase'
@@ -203,6 +202,7 @@ def fetch_wrap():
 
 '''MAIN MENU'''
 def main_menu():
+    print("0. Draw a Taxonomy Tree")
     print("1. Conservation Analysis")
     print("2. Scan for PROSITE Motifs")
     print("3. Perform Blast Analysis")
@@ -226,10 +226,17 @@ def main():
     while True:
         choice = main_menu()
 
+        if choice == '0':
+            # input the main info of the protein
+            taxonomy = input("Enter the taxonomic group: ")
+            protein_family = input("Enter the protein family: ")
+            limit = input("Enter the max number of fetched results: ")
+
+            get_taxonomic_tree(taxonomy)
+            
         '''CONSERVATION ANALYSIS'''
         if choice == '1':
             # input the main info of the protein
-            Entrez.email = input("Enter your Email: ")
             taxonomy = input("Enter the taxonomic group: ")
             protein_family = input("Enter the protein family: ")
             limit = input("Enter the max number of fetched results: ")
