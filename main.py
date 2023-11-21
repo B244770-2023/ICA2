@@ -20,7 +20,7 @@ def set_working_directory():
     os.chdir(script_dir)
     print(f"working directory changed to: {script_dir}")
 
-'''RUN COMMANDS FUNCTION'''
+'''RUN BASH COMMANDS FUNCTION'''
 def run_command(command):
     try:
         # if command is a list, convert it to a string
@@ -104,12 +104,11 @@ def fetch_sequences(species_protein_map, taxonomy):
         os.makedirs(folder_path)
 
     sequences = {}
-    # fetch handle
     for species, protein_id in species_protein_map.items():
-        # Fetch the protein sequence using efetch
+        # fetch the protein sequence using efetch
         protein_sequence = run_command(["efetch", "-db", "protein", "-id", protein_id, "-format", "fasta"])
 
-        # Write the sequence to a file
+        # write the sequence to a file
         file_path = os.path.join(folder_path, f"{species}.fasta")
         with open(file_path, 'w') as file:
             file.write(protein_sequence)
@@ -130,6 +129,36 @@ def run_emboss_conservation(taxonomy, protein_family, sequences):
                 "-winsize", "4", "-graph", "png", "-goutfile", f"{taxonomy}/{protein_family}/conservation_plot"])
     except Exception as e:
         print(f"Error Msg: {e}")
+
+'''PARSE SEQUENCES FROM FASTA FORMAT FILE'''
+def parse_fasta_sequences(filename):
+    with open(filename, 'r') as file:
+        sequences = []
+        sequence = ''
+        for line in file:
+            if line.startswith('>'):
+                if sequence:
+                    sequences.append(sequence)
+                sequence = ''
+            else:
+                sequence += line.strip()
+        if sequence:
+            sequences.append(sequence)
+    return sequences
+
+'''SIMPLE CONSERVATION ANALYSIS BY CALCULATING SCORE OF EACH POSITION'''
+def calculate_conservation(sequences):
+    sequence_length = len(sequences[0])
+    num_sequences = len(sequences)
+    
+    conservation_scores = []
+    for i in range(sequence_length):
+        position = [seq[i] for seq in sequences]
+        most_common_residue = max(set(position), key=position.count)
+        frequency = position.count(most_common_residue) / num_sequences
+        conservation_scores.append(frequency)
+    return conservation_scores
+
 
 '''FUNCTION FOR PROSITE SCANNING'''
 def scan_prosite(sequences):
@@ -246,6 +275,16 @@ def main():
 
             # run emboss conservation analysis
             conservation_data = run_emboss_conservation(taxonomy, protein_family, all_sequences)
+
+            # Conservation analysis
+            aligned_sequences_file = f"{taxonomy}/{protein_family}/aligned_sequences.fasta"
+            aligned_sequences = parse_fasta_sequences(aligned_sequences_file)
+            conservation_scores = calculate_conservation(aligned_sequences)
+
+            # Print conservation scores
+            for i, score in enumerate(conservation_scores):
+                print(f"Position {i+1}: Conservation Score = {score:.2f}")
+
 
         '''SCAN PROTEIN SEQUENCE WITH INTEREST'''
         if choice == '2':
