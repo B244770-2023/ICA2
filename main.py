@@ -5,9 +5,9 @@ import io
 import sys
 import requests
 import subprocess
-from Bio.ExPASy import ScanProsite
-from Bio.Blast import NCBIWWW
-from bs4 import BeautifulSoup
+import xml.etree.ElementTree as ET
+from lxml import etree
+from urllib.parse import quote
 
 '''SET WORKING DIRECTORY'''
 def set_working_directory():
@@ -31,7 +31,16 @@ def run_command(command):
     except subprocess.CalledProcessError as e:
         print(f"Error running command: {e.stderr}")
         sys.exit(1)
-        
+      
+'''RUN RESTFUL API'''  
+def run_post(url):
+    response = requests.get(url)
+    if response.status_code != 200:
+        print(f"Error making request: {response.status_code}")
+        print(response.text)
+        return None
+    return response.json()
+
 '''DRAW A TAXONOMIC TREE'''
 def get_taxonomic_tree(taxonomic_group):
     # Search for the taxonomic group to get the NCBI Taxonomy ID
@@ -56,33 +65,50 @@ def get_taxonomic_tree(taxonomic_group):
 
 '''FETCH ALL SEQUENCES AND WRITE IN ON FILE, WITH A LIMIT'''
 def fetch_sequences_all(taxonomy, protein_family, limit):
-    query = f"{protein_family}[Protein Name] AND {taxonomy}[Organism]"
-    protein_sequences = run_command(["esearch", "-db", "protein", "-query", query, "|", "efetch", "-format", "fasta"])
+    query = f'"{protein_family}[Protein Name] AND {taxonomy}[Organism]"'
+    command = f"esearch -db protein -query {query} -retmax {limit} | efetch -format fasta"
+    protein_sequences = run_command(command)
 
-    # save sequences to a file
+    # Save sequences to a file
     folder_path = f'{taxonomy}/{protein_family}'
-    if not os.path.exists(folder_path):
-        os.makedirs(folder_path)
+    os.makedirs(folder_path, exist_ok=True)
     with open(f'{folder_path}/sequences.fasta', 'w') as file:
         file.write(protein_sequences)
 
+'''OLD VERSION OF FETCH ALL SEQUENCES'''
+# def fetch_sequences_all(taxonomy, protein_family, limit):
+#     query = f"{protein_family}[Protein Name] AND {taxonomy}[Organism]"
+#     protein_sequences = run_command(["esearch", "-db", "protein", "-query", query, "|", "efetch", "-format", "fasta"])
+
+#     # save sequences to a file
+#     folder_path = f'{taxonomy}/{protein_family}'
+#     if not os.path.exists(folder_path):
+#         os.makedirs(folder_path)
+#     with open(f'{folder_path}/sequences.fasta', 'w') as file:
+#         file.write(protein_sequences)
+
 '''GET SPECIES~PROTEIN_IDS LIST'''
 def get_species_protein_ids(taxonomy, protein_family, limit):
-    # fetch all sequence IDs
-    query = f"{protein_family}[Protein Name] AND {taxonomy}[Organism]"
-    ids = run_command(f"esearch -db protein -query '{query}' -retmax {limit} | efetch -format docsum")
+    command = (
+        f"esearch -db protein -query \"{protein_family}[Protein Name] AND {taxonomy}[Organism]\" | "
+        f"efetch -format xml | "
+        f"xtract -pattern Seq-entry -element Title,Accession"
+    )
 
-    # parse XML to extract protein IDs
-    root = ET.fromstring(ids)
-    protein_ids = [docsum.find('Id').text for docsum in root.findall('DocumentSummary')]
+    # run command
+    result = run_command(command)
 
+    # parse xml
     species_protein_map = {}
-    # fetch names of each protein's species
-    for protein_id in protein_ids:
-        xml_data = run_command(f"efetch -db protein -id {protein_id} -format gb")
-        xml_root = ET.fromstring(xml_data)
-        species_name = xml_root.find(".//GBSeq_organism").text
-        species_protein_map[species_name] = protein_id
+    root = ET.fromstring(result)
+    for entry in root.findall('Seq-entry'):
+        title = entry.find('Title').text
+        accession = entry.find('Accession').text
+
+        # extract ids and species
+        species_name = title.split('[')[-1].rstrip(']')
+        species_protein_map[species_name] = accession
+
     return species_protein_map
 
 '''PARSE DICTIONARY OBJ TO FASTA FORMAT'''
@@ -161,15 +187,20 @@ def calculate_conservation(sequences):
 
 
 '''FUNCTION FOR PROSITE SCANNING'''
-def scan_prosite(sequences):
-    #scan sequences with motifs from prosite db
-    matched_motifs = {}
-    for sequence in sequences:
-        if sequence: # empty check
-            search_handle = ScanProsite.scan(seq=sequence, output='html')
-            scan_results = ScanProsite.read(search_handle)
-            motifs_results[species] = [result['signature_ac'] for result in scan_results]
-    return matched_motifs
+def scan_prosite_motifs(sequence_file):
+    command = f"patmatmotifs -sequence {sequence_file} -full"
+    return run_command(command)
+
+def scan_all_sequences(selected_species, folder_path):
+    results = {}
+    for species in selected_species.keys():
+        sequence_file = os.path.join(folder_path, f"{species}.fasta")
+        results[species] = scan_prosite_motifs(sequence_file)
+    # write to files    
+    result_file = os.path.join(folder_path, f"{species}_scan_results.txt")
+    with open(result_file, 'w') as file:
+        file.write(result)
+    return results
 
 '''BLAST'''
 def do_blast(sequences):
@@ -196,9 +227,8 @@ def predict_structure(protein_sequence):
     else:
         return "Failed to request SWISS-MODEL API"
 
-'''FETCH CODE WRAP'''
-'''codes for fetch prefered protein sequences and return in dictionary'''
-def fetch_wrap():
+'''codes for interaction with user'''
+def choice_wrap():
     taxonomy = 'aves'
     # taxonomy = input("Enter the taxonomic group: ")
     protein_family = 'glucose-6-phosphatase'
@@ -207,7 +237,7 @@ def fetch_wrap():
     # limit = input("Enter the max number of fetched results: ")
     # Initialize sequences as an empty dictionary
     sequences = {}
-    #species mapping
+    #species mapping with a limitf
     species_protein_map = get_species_protein_ids(taxonomy, protein_family, limit)
     # giving a list of species and corresponding protein ids
     print("\nAvailable species and corresponding protein IDs:")
@@ -225,9 +255,8 @@ def fetch_wrap():
         selected_species = {species: species_protein_map[species] 
                             for idx, species in enumerate(species_protein_map, start=1)
                             if str(idx) in selected_indexes.split(',')}
-        # fetch the sequence
-        sequences = fetch_sequences(selected_species, taxonomy)
-    return sequences
+    # return choices
+    return selected_species, taxonomy
 
 '''MAIN MENU'''
 def main_menu():
@@ -288,14 +317,17 @@ def main():
 
         '''SCAN PROTEIN SEQUENCE WITH INTEREST'''
         if choice == '2':
-            sequences = fetch_wrap()
-            # scan motifs
-            matched_motifs = scan_prosite(to_fasta_format(sequences))
-            # display
-            for species, motifs in matched_motifs.items():
-                print(f"\n{species} has the following motifs:")
-                for motif in motifs:
-                    print(motif)
+            selected_species, taxonomy = choice_wrap()
+            # download selected sequences in a folder
+            folder_path = f"/PrositeScan/{taxonomy}_sequences"
+            os.makedirs(folder_path, exist_ok=True)
+
+            save_sequences_to_file(selected_species, folder_path)
+            scan_results = scan_all_sequences(selected_species, folder_path)
+
+            # print result
+            for species, result in scan_results.items():
+                print(f"Results for {species}:\n{result}")
         
         '''BLAST'''
         if choice =='3':
