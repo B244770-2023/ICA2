@@ -1,13 +1,13 @@
 #!/usr/bin/python3
 
 import os
-import io
 import sys
 import requests
 import subprocess
 import xml.etree.ElementTree as ET
-from lxml import etree
-from urllib.parse import quote
+import json
+import time
+
 
 '''SET WORKING DIRECTORY'''
 def set_working_directory():
@@ -33,7 +33,7 @@ def run_command(command):
         sys.exit(1)
       
 '''RUN RESTFUL API'''  
-def run_post(url):
+def run_get(url):
     response = requests.get(url)
     if response.status_code != 200:
         print(f"Error making request: {response.status_code}")
@@ -43,20 +43,41 @@ def run_post(url):
 
 '''DRAW A TAXONOMIC TREE'''
 def get_taxonomic_tree(taxonomic_group):
-    # Search for the taxonomic group to get the NCBI Taxonomy ID
-    search_xml = run_command(f"esearch -db taxonomy -query '{taxonomic_group}' | efetch -format xml")
-    root = ET.fromstring(search_xml)
-    tax_id = root.find(".//Id").text
+    # Define the base URL for NCBI E-utilities
+    base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
 
-    # get the lineage
-    lineage_xml = run_command(f"efetch -db taxonomy -id {tax_id} -format xml")
-    lineage_root = ET.fromstring(lineage_xml)
+    # Perform the search to get the NCBI Taxonomy ID
+    search_url = f"{base_url}/esearch.fcgi"
+    search_params = {
+        "db": "taxonomy",
+        "term": taxonomic_group,
+        "retmode": "xml"
+    }
+    search_response = requests.get(search_url, params=search_params)
+    search_root = ET.fromstring(search_response.text)
+    
+    tax_id_element = search_root.find(".//Id")
+    if tax_id_element is None:
+        print(f"Taxonomic ID for '{taxonomic_group}' not found.")
+        return ""
 
-    # extract lineage information
+    tax_id = tax_id_element.text
+
+    # Get the lineage using the fetched taxonomic ID
+    fetch_url = f"{base_url}/efetch.fcgi"
+    fetch_params = {
+        "db": "taxonomy",
+        "id": tax_id,
+        "retmode": "xml"
+    }
+    fetch_response = requests.get(fetch_url, params=fetch_params)
+    lineage_root = ET.fromstring(fetch_response.text)
+
+    # Extract lineage information
     lineage_ids = [taxon.find('TaxId').text for taxon in lineage_root.findall(".//LineageEx/Taxon")]
     lineage_names = [taxon.find('ScientificName').text for taxon in lineage_root.findall(".//LineageEx/Taxon")]
 
-    # generate a tree view as a string
+    # Generate a tree view as a string
     tree_str = ""
     for depth, (taxid, name) in enumerate(zip(lineage_ids, lineage_names)):
         tree_str += " " * depth + f"- {name} ('{taxid}')\n"
@@ -75,39 +96,48 @@ def fetch_sequences_all(taxonomy, protein_family, limit):
     with open(f'{folder_path}/sequences.fasta', 'w') as file:
         file.write(protein_sequences)
 
-'''OLD VERSION OF FETCH ALL SEQUENCES'''
-# def fetch_sequences_all(taxonomy, protein_family, limit):
-#     query = f"{protein_family}[Protein Name] AND {taxonomy}[Organism]"
-#     protein_sequences = run_command(["esearch", "-db", "protein", "-query", query, "|", "efetch", "-format", "fasta"])
-
-#     # save sequences to a file
-#     folder_path = f'{taxonomy}/{protein_family}'
-#     if not os.path.exists(folder_path):
-#         os.makedirs(folder_path)
-#     with open(f'{folder_path}/sequences.fasta', 'w') as file:
-#         file.write(protein_sequences)
-
 '''GET SPECIES~PROTEIN_IDS LIST'''
 def get_species_protein_ids(taxonomy, protein_family, limit):
-    command = (
-        f"esearch -db protein -query \"{protein_family}[Protein Name] AND {taxonomy}[Organism]\" | "
-        f"efetch -format xml | "
-        f"xtract -pattern Seq-entry -element Title,Accession"
-    )
+    # https request
+    esearch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
+    esearch_params = {
+        'db': 'protein',
+        'term': f"{protein_family}[Protein Name] AND {taxonomy}[Organism]",
+        'retmax': limit,
+        'retmode': 'xml',
+    }
+    esearch_response = requests.get(esearch_url, params=esearch_params)
+    if esearch_response.status_code != 200 or not esearch_response.text:
+        print("Error fetching data from ESearch")
+        return {}
 
-    # run command
-    result = run_command(command)
+    # parse esearch results to extract id list
+    root = ET.fromstring(esearch_response.text)
+    ids = [id_elem.text for id_elem in root.findall('.//Id')]
 
-    # parse xml
+    if not ids:
+        print("No IDs found in ESearch result")
+        return {}
+
+    # efetch results
+    efetch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
+    efetch_params = {
+        'db': 'protein',
+        'id': ','.join(ids),
+        'retmode': 'xml',
+    }
+    efetch_response = requests.get(efetch_url, params=efetch_params)
+    if efetch_response.status_code != 200 or not efetch_response.text:
+        print("Error fetching data from EFetch")
+        return {}
+
+    # parse efetch results，establishing mapping relationship between species and ids
     species_protein_map = {}
-    root = ET.fromstring(result)
-    for entry in root.findall('Seq-entry'):
-        title = entry.find('Title').text
-        accession = entry.find('Accession').text
-
-        # extract ids and species
-        species_name = title.split('[')[-1].rstrip(']')
-        species_protein_map[species_name] = accession
+    efetch_root = ET.fromstring(efetch_response.text)
+    for seq_entry in efetch_root.findall('.//GBSeq'):
+        protein_id = seq_entry.find('.//GBSeq_primary-accession').text
+        species_name = seq_entry.find('.//GBSeq_organism').text
+        species_protein_map[species_name] = protein_id
 
     return species_protein_map
 
@@ -122,13 +152,7 @@ def to_fasta_format(seq_dict):
     return fasta_format_str
 
 '''DOWNLOAD SEQUENCES BASED ON CHOSEN SPECIES'''
-def fetch_sequences(species_protein_map, taxonomy):
-    
-    # Create directory for the inerested proteins
-    folder_path = f'interested/{taxonomy}'
-    if not os.path.exists(folder_path):
-        os.makedirs(folder_path)
-
+def fetch_sequences(species_protein_map, taxonomy, folder_path):
     sequences = {}
     for species, protein_id in species_protein_map.items():
         # fetch the protein sequence using efetch
@@ -187,57 +211,172 @@ def calculate_conservation(sequences):
 
 
 '''FUNCTION FOR PROSITE SCANNING'''
-def scan_prosite_motifs(sequence_file):
-    command = f"patmatmotifs -sequence {sequence_file} -full"
-    return run_command(command)
+def scan_prosite_motifs(sequence_file, folder_path, species):
+    # create the output directory if it does not exist
+    output_dir = os.path.join(folder_path, "Scan_reports")
+    os.makedirs(output_dir, exist_ok=True)
+
+    # define the path for the result file
+    result_file = os.path.join(output_dir, f"{species}.txt")
+    command = f"patmatmotifs -sequence \"{sequence_file}\" -outfile \"{result_file}\" -full"
+    print(f"Scan for {sequence_file} begins.\n")
+    result =  run_command(command)
+    print(f"Scan result for {species} saved as {result_file}\n")
+    return result_file
 
 def scan_all_sequences(selected_species, folder_path):
     results = {}
     for species in selected_species.keys():
         sequence_file = os.path.join(folder_path, f"{species}.fasta")
-        results[species] = scan_prosite_motifs(sequence_file)
-    # write to files    
-    result_file = os.path.join(folder_path, f"{species}_scan_results.txt")
-    with open(result_file, 'w') as file:
-        file.write(result)
-    return results
+        results[species] = scan_prosite_motifs(sequence_file, folder_path, species)
+        with open(results[species], 'r') as file:
+            print(f"Results for {species}:\n")
+            for line in file:
+                # print line by line
+                print(line, end='')
+            print("\n")
+    # emptyness check
+    if not results:
+        print("No similar motifs detected.")
+        return {}
+    else:
+        return results
 
-'''BLAST'''
-def do_blast(sequences):
-    for sequence in sequences:
-        result_handle = NCBIWWW.qblast("blastp", "nr", sequence.seq)
-    return result_handle.read()
+'''FIND HIGH SIMILARITY MOTIFS'''
+def find_high_similarity_motifs(folder_path, similarity_threshold):
+    motif_data = []
+
+    # List all .txt files in the folder
+    for filename in os.listdir(folder_path):
+        if filename.endswith('.txt'):
+            file_path = os.path.join(folder_path, filename)
+
+            # Read the file and extract motifs
+            with open(file_path, 'r') as file:
+                for line in file:
+                    if "some_condition_to_identify_motif_lines" in line:
+                        # Extract motif and similarity score
+                        motif, similarity = extract_motif_and_similarity(line)
+                        if similarity >= similarity_threshold:
+                            motif_data.append((motif, similarity))
+
+    return motif_data
+
+'''Phylogenetic tree'''  
+'''merge all fasta files into one''' 
+def merge_fasta_files(input_folder, output_file):
+    with open(output_file, 'w') as merged_file:
+        for file in os.listdir(input_folder):
+            if file.endswith(".fasta") or file.endswith(".fa"):
+                file_path = os.path.join(input_folder, file)
+                with open(file_path, 'r') as fasta_file:
+                    merged_file.write(fasta_file.read() + "\n")
+
+'''convert FASTA format to phylip format.'''
+def convert_fasta_to_phylip(input_fasta, output_phylip):
+    with open(input_fasta, 'r') as fasta_file, open(output_phylip, 'w') as phylip_file:
+        sequences = {}
+        current_seq_name = None
+
+        for line in fasta_file:
+            line = line.strip()
+            if not line:
+                continue # ignore null line
+            if line.startswith(">"):
+                current_seq_name = line[1:].split()[0]  # extract sequence name
+                sequences[current_seq_name] = []
+            elif current_seq_name:
+                sequences[current_seq_name].append(line)
+            else:
+                print("Error in FASTA file format: Sequence data found before sequence name.")
+                return
+
+        if not sequences:
+            print("No sequences found in the FASTA file.")
+            return
+
+        num_sequences = len(sequences)
+        sequence_length = len(''.join(sequences[next(iter(sequences))]))
+        phylip_file.write(f"{num_sequences} {sequence_length}\n")
+
+        for seq_name, seq_parts in sequences.items():
+            sequence = ''.join(seq_parts)
+            phylip_file.write(f"{seq_name[:10].ljust(10)} {sequence}\n")
+
+'''run phyml to generate a phylogenetic tree.'''
+def run_phyml(input_phylip, output_tree):
+    print("run phyml command")
+    command = f"phyml -i {input_phylip} -o {output_tree} -d nt -b 100 -m GTR"
+    try:
+        result = run_command(command)
+        print(f"Phylogenetic tree generated at: {output_tree}")
+    except Exception as e:
+        print(f"Error generating phylogenetic tree: {e}")
 
 '''SWISS-MODEL'''
-def predict_structure(protein_sequence):
-    # query url
-    swiss_model_url = "https://swissmodel.expasy.org/interactive"
+def predict_structure(file_path):
+    with open(file_path, 'r') as file:
+        sequence = ''
+        for line in file:
+            if line.startswith('>'):
+                if sequence:
+                    break
+            else:
+                sequence += line.strip()
 
+    if not sequence:
+        return "No sequence found in the FASTA file"
+
+    # headers
+    token = "1c816e2026a070e2a4c76b828275e7f41853a370"
+    headers={ 'Content-Type': 'application/json', "Authorization": f"Token {token}" }
+
+    # query url
+    swiss_model_url = "https://swissmodel.expasy.org/automodel"
+
+    # data
+    data = json.dumps({"target_sequences": [sequence], "project_title":"ICA2 project"})
     # create a post
-    response = requests.post(swiss_model_url, data={"seq": protein_sequence})
+    response = requests.post(swiss_model_url, data = data, headers = headers)
 
     # check response
-    if response.status_code == 200:
-        # get response url using soup
-        soup = BeautifulSoup(response.text, "html.parser")
-        result_link = soup.find("a", class_="models-result-link")
-        if result_link:
-            result_url = result_link.get("href")
-            return result_url
-    else:
-        return "Failed to request SWISS-MODEL API"
+    # Obtain the project_id from the response created above
+    project_id = response.json()["project_id"]
+
+    # And loop until the project completes
+    while True:
+        # We wait for some time
+        time.sleep(10)
+
+        # Update the status from the server 
+        response = requests.get(
+            f"https://swissmodel.expasy.org/project/{project_id}/models/summary/", 
+            headers={ "Authorization": f"Token {token}" })
+
+        # Update the status
+        status = response.json()["status"]
+
+        print('Job status is now', status)
+
+        if status in ["COMPLETED", "FAILED"]:
+            break
 
 '''codes for interaction with user'''
-def choice_wrap():
-    taxonomy = 'aves'
-    # taxonomy = input("Enter the taxonomic group: ")
-    protein_family = 'glucose-6-phosphatase'
-    # protein_family = input("Enter the protein family: ")
-    limit = 5
-    # limit = input("Enter the max number of fetched results: ")
+def choice_wrap(folder):
+    taxonomy = input("Enter the taxonomic group: ")
+    protein_family = input("Enter the protein family: ")
+    limit = input("Enter the max number of fetched results: ")
     # Initialize sequences as an empty dictionary
     sequences = {}
-    #species mapping with a limitf
+    selected_species = {}
+
+    # Create directory for the inerested proteins
+    folder_path = f'{folder}/{taxonomy}'
+    if not os.path.exists(folder_path):
+        os.makedirs(folder_path)
+    os.makedirs(folder_path, exist_ok=True)
+
+    #species mapping with a limit
     species_protein_map = get_species_protein_ids(taxonomy, protein_family, limit)
     # giving a list of species and corresponding protein ids
     print("\nAvailable species and corresponding protein IDs:")
@@ -248,25 +387,29 @@ def choice_wrap():
     download_choice = input("\nEnter protein id of your choice. Type 'all' for all sequences, or 'select' to choose specific ones: ")
     # download all sequence
     if download_choice.lower() == 'all':
-        sequences = fetch_sequences(species_protein_map, taxonomy)
+        sequences = fetch_sequences(species_protein_map, taxonomy, folder_path)
+        print("You choosed all.")
     # download selected ones
     elif download_choice.lower() == 'select':
         selected_indexes = input("Enter the numbers of species you are interested in (separated by commas): ")
         selected_species = {species: species_protein_map[species] 
                             for idx, species in enumerate(species_protein_map, start=1)
                             if str(idx) in selected_indexes.split(',')}
+        sequences = fetch_sequences(selected_species, taxonomy, folder_path)
+        print("your choice:")
+        print(selected_species)
     # return choices
-    return selected_species, taxonomy
+    return sequences, taxonomy, folder_path
 
 '''MAIN MENU'''
 def main_menu():
+    print("\nMain Menu:")
     print("0. Draw a Taxonomy Tree")
     print("1. Conservation Analysis")
     print("2. Scan for PROSITE Motifs")
-    print("3. Perform Blast Analysis")
+    print("3. Construct Phylogenetic Tree")
     print("4. Structure Prediction with SWISS-MODEL")
     print("5. Exit")
-    print("6. Exit")
     choice = input("Choose a module by typing a number: ")
     return choice
 
@@ -285,12 +428,10 @@ def main():
         choice = main_menu()
 
         if choice == '0':
-            # input the main info of the protein
+            # input taxonomy
             taxonomy = input("Enter the taxonomic group: ")
-            protein_family = input("Enter the protein family: ")
-            limit = input("Enter the max number of fetched results: ")
-
-            get_taxonomic_tree(taxonomy)
+            # print a tree with a total number in brackets
+            print(get_taxonomic_tree(taxonomy))
             
         '''CONSERVATION ANALYSIS'''
         if choice == '1':
@@ -317,33 +458,46 @@ def main():
 
         '''SCAN PROTEIN SEQUENCE WITH INTEREST'''
         if choice == '2':
-            selected_species, taxonomy = choice_wrap()
             # download selected sequences in a folder
-            folder_path = f"/PrositeScan/{taxonomy}_sequences"
-            os.makedirs(folder_path, exist_ok=True)
+            selected_species, taxonomy, folder_path = choice_wrap("prosite")
+            scan_all_sequences(selected_species, folder_path)
+            reports_path = os.path.join(folder_path,"Scan_reports")
+            similarity_threshold = 0.8  # threshold for high similarity
+            high_similarity_motifs = find_high_similarity_motifs(reports_path, similarity_threshold)
 
-            save_sequences_to_file(selected_species, folder_path)
-            scan_results = scan_all_sequences(selected_species, folder_path)
-
-            # print result
-            for species, result in scan_results.items():
-                print(f"Results for {species}:\n{result}")
+            for motif, similarity in high_similarity_motifs:
+                print(f"Motif: {motif}, Similarity: {similarity}")
         
-        '''BLAST'''
+        '''phylogenetic tree'''
         if choice =='3':
-            do_blast(fetch_wrap())
+            # download selected sequences in a folder
+            sequences, taxonomy, folder_path = choice_wrap("phylotree")
+            # merge all FASTA files into one
+            merged_fasta_file = os.path.join(folder_path, "merged_sequences.fasta")
+            merge_fasta_files(folder_path, merged_fasta_file)
+
+            # convert merged FASTA to PHYLIP format
+            phylip_file = os.path.join(folder_path, "converted_sequences.phylip")
+            convert_fasta_to_phylip(merged_fasta_file, phylip_file)
+
+            # generate the phylogenetic tree using PhyML
+            output_tree = os.path.join(folder_path, "phylogenetic_tree")
+            run_phyml(phylip_file, output_tree)
+
+            print(f"Phylogenetic tree generated at: {output_tree}")
+            
         
         '''Predict Structure'''
         if choice =='4':
-            print(predict_structure(fetch_wrap()))
+            sequences, taxonomy, folder_path = choice_wrap("swiss-model")
+            merged_fasta_file = os.path.join(folder_path, "merged_sequences.fasta")
+            merge_fasta_files(folder_path,merged_fasta_file)
+            print(predict_structure(merged_fasta_file))
 
-        '''BLAST'''
+        '''EXIT'''
         if choice =='5':
-            do_blast(fetch_wrap)
-
-        '''BLAST'''
-        if choice =='6':
-            do_blast(fetch_wrap)
+            print("Goodbye!")
+            break
 
 if __name__ == '__main__':
     #set working dir as cwd or a configured one
